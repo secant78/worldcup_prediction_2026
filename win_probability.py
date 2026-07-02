@@ -35,23 +35,27 @@ ES_HOST = os.getenv("ES_HOST", "http://localhost:9200")
 # ─── Feature vector ────────────────────────────────────────────────────────────
 
 FEATURE_NAMES = [
-    "home_form",
-    "away_form",
-    "home_avg_goals_scored",
-    "away_avg_goals_scored",
-    "home_avg_goals_conceded",
-    "away_avg_goals_conceded",
-    "home_goal_diff",
-    "away_goal_diff",
-    "home_clean_sheet_rate",
-    "away_clean_sheet_rate",
-    "home_comeback_wins",
-    "away_comeback_wins",
-    "home_sentiment",
-    "away_sentiment",
-    "form_delta",         # home_form - away_form
-    "goal_diff_delta",    # home_goal_diff - away_goal_diff
-    "sentiment_delta",    # home_sentiment - away_sentiment
+    # Basic
+    "home_form", "away_form",
+    "home_avg_goals_scored", "away_avg_goals_scored",
+    "home_avg_goals_conceded", "away_avg_goals_conceded",
+    "home_goal_diff", "away_goal_diff",
+    "home_clean_sheet_rate", "away_clean_sheet_rate",
+    "home_comeback_wins", "away_comeback_wins",
+    # Sentiment
+    "home_sentiment", "away_sentiment",
+    # Advanced
+    "home_xg", "away_xg",
+    "home_xga", "away_xga",
+    "home_xg_diff", "away_xg_diff",
+    "home_possession", "away_possession",
+    "home_shot_accuracy", "away_shot_accuracy",
+    "home_pass_accuracy", "away_pass_accuracy",
+    "home_shots_on_target", "away_shots_on_target",
+    "home_ppda", "away_ppda",
+    # Deltas
+    "form_delta", "goal_diff_delta", "sentiment_delta",
+    "xg_delta", "possession_delta", "shot_accuracy_delta",
 ]
 
 
@@ -67,25 +71,37 @@ def build_feature_vector(home: str, away: str, team_features: dict, team_sentime
     away_gd = af.get("goal_difference", 0)
     home_sent = hs.get("avg_sentiment", 0.5)
     away_sent = as_.get("avg_sentiment", 0.5)
+    home_xg = hf.get("xg", 0.0)
+    away_xg = af.get("xg", 0.0)
+    home_xga = hf.get("xga", 0.0)
+    away_xga = af.get("xga", 0.0)
+    home_poss = hf.get("avg_possession", 0.5)
+    away_poss = af.get("avg_possession", 0.5)
+    home_shot_acc = hf.get("shot_accuracy", 0.0)
+    away_shot_acc = af.get("shot_accuracy", 0.0)
 
     return np.array([
-        home_form,
-        away_form,
-        hf.get("avg_goals_scored", 1.0),
-        af.get("avg_goals_scored", 1.0),
-        hf.get("avg_goals_conceded", 1.0),
-        af.get("avg_goals_conceded", 1.0),
-        home_gd,
-        away_gd,
-        hf.get("clean_sheet_rate", 0.0),
-        af.get("clean_sheet_rate", 0.0),
-        hf.get("comeback_wins", 0),
-        af.get("comeback_wins", 0),
-        home_sent,
-        away_sent,
+        home_form, away_form,
+        hf.get("avg_goals_scored", 1.0), af.get("avg_goals_scored", 1.0),
+        hf.get("avg_goals_conceded", 1.0), af.get("avg_goals_conceded", 1.0),
+        home_gd, away_gd,
+        hf.get("clean_sheet_rate", 0.0), af.get("clean_sheet_rate", 0.0),
+        hf.get("comeback_wins", 0), af.get("comeback_wins", 0),
+        home_sent, away_sent,
+        home_xg, away_xg,
+        home_xga, away_xga,
+        home_xg - home_xga, away_xg - away_xga,
+        home_poss, away_poss,
+        home_shot_acc, away_shot_acc,
+        hf.get("avg_pass_accuracy", 0.0), af.get("avg_pass_accuracy", 0.0),
+        hf.get("avg_shots_on_target", 0.0), af.get("avg_shots_on_target", 0.0),
+        hf.get("ppda", 0.0), af.get("ppda", 0.0),
         home_form - away_form,
         home_gd - away_gd,
         home_sent - away_sent,
+        home_xg - away_xg,
+        home_poss - away_poss,
+        home_shot_acc - away_shot_acc,
     ])
 
 
@@ -134,11 +150,19 @@ def train_model(finished: list[dict], team_features: dict, team_sentiment: dict)
 
 
 def predict_match(model, scaler, home: str, away: str, team_features: dict, team_sentiment: dict) -> dict:
-    vec = build_feature_vector(home, away, team_features, team_sentiment).reshape(1, -1)
-    vec_scaled = scaler.transform(vec)
-    probs = model.predict_proba(vec_scaled)[0]
+    vec = build_feature_vector(home, away, team_features, team_sentiment)
 
-    # classes are ordered by encode_outcome: 0=away, 1=draw, 2=home
+    # Use SageMaker endpoint if available, fall back to local model
+    try:
+        from sagemaker_model import endpoint_is_available, predict_via_endpoint
+        if endpoint_is_available():
+            return predict_via_endpoint(vec)
+    except Exception:
+        pass
+
+    # Local sklearn fallback
+    vec_scaled = scaler.transform(vec.reshape(1, -1))
+    probs = model.predict_proba(vec_scaled)[0]
     class_order = model.classes_
     prob_map = dict(zip(class_order, probs))
 
@@ -146,6 +170,7 @@ def predict_match(model, scaler, home: str, away: str, team_features: dict, team
         "home_win": round(prob_map.get(2, 0) * 100, 1),
         "draw": round(prob_map.get(1, 0) * 100, 1),
         "away_win": round(prob_map.get(0, 0) * 100, 1),
+        "source": "local",
     }
 
 

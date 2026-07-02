@@ -1,0 +1,131 @@
+name: Build & Deploy
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["terraform/**", "*.md"]
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+
+jobs:
+  build-and-push:
+    name: Build Docker images & push to ECR
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        service:
+          - name: consumer
+            dockerfile: docker/Dockerfile.consumer
+          - name: producer-reddit
+            dockerfile: docker/Dockerfile.producer-reddit
+          - name: producer-youtube
+            dockerfile: docker/Dockerfile.producer-youtube
+          - name: producer-football
+            dockerfile: docker/Dockerfile.producer-football
+          - name: streamlit
+            dockerfile: docker/Dockerfile.streamlit
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push ${{ matrix.service.name }}
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ${{ matrix.service.dockerfile }}
+          push: true
+          tags: |
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/worldcup-sentiment-prod/${{ matrix.service.name }}:latest
+            ${{ env.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/worldcup-sentiment-prod/${{ matrix.service.name }}:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Deploy to ECS
+    needs: build-and-push
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy consumer
+        run: |
+          aws ecs update-service \
+            --cluster worldcup-sentiment-prod \
+            --service consumer \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy producer-reddit
+        run: |
+          aws ecs update-service \
+            --cluster worldcup-sentiment-prod \
+            --service producer-reddit \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy producer-youtube
+        run: |
+          aws ecs update-service \
+            --cluster worldcup-sentiment-prod \
+            --service producer-youtube \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy producer-football
+        run: |
+          aws ecs update-service \
+            --cluster worldcup-sentiment-prod \
+            --service producer-football \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Deploy streamlit
+        run: |
+          aws ecs update-service \
+            --cluster worldcup-sentiment-prod \
+            --service streamlit \
+            --force-new-deployment \
+            --region ${{ env.AWS_REGION }}
+
+      - name: Wait for deployments to stabilize
+        run: |
+          for service in consumer producer-reddit producer-youtube producer-football streamlit; do
+            echo "Waiting for $service..."
+            aws ecs wait services-stable \
+              --cluster worldcup-sentiment-prod \
+              --services $service \
+              --region ${{ env.AWS_REGION }}
+          done
+
+      - name: Post deployment summary
+        run: |
+          echo "### Deployment complete ✅" >> $GITHUB_STEP_SUMMARY
+          echo "Commit: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "Services deployed: consumer, producer-reddit, producer-youtube, producer-football, streamlit" >> $GITHUB_STEP_SUMMARY

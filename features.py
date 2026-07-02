@@ -130,9 +130,49 @@ def compute_team_features(matches: list[dict]) -> dict[str, dict]:
             "comeback_wins": comeback_wins,
             "avg_cards": np.mean(cards_per_match) if cards_per_match else 0,
             "total_points": sum(p / (RECENCY_DECAY ** (n - 1 - i)) for i, p in enumerate(points)),
+            # Advanced stats (populated by merge_advanced_stats)
+            "xg": 0.0,
+            "xga": 0.0,
+            "xg_difference": 0.0,
+            "avg_possession": 0.0,
+            "avg_shots_on_target": 0.0,
+            "shot_accuracy": 0.0,
+            "avg_pass_accuracy": 0.0,
+            "avg_corners": 0.0,
+            "avg_saves": 0.0,
+            "ppda": 0.0,
+            "progressive_passes": 0.0,
+            "progressive_carries": 0.0,
+            "pressures": 0.0,
         }
 
     return features
+
+
+def merge_advanced_stats(team_features: dict, advanced: dict) -> dict:
+    """Merge FBref/API-Football advanced stats into team_features in-place."""
+    for team, stats in advanced.items():
+        # Try exact match first, then case-insensitive
+        match = team if team in team_features else next(
+            (k for k in team_features if k.lower() == team.lower()), None
+        )
+        if not match:
+            continue
+        tf = team_features[match]
+        tf["xg"] = stats.get("xg", tf["xg"])
+        tf["xga"] = stats.get("xga", tf["xga"])
+        tf["xg_difference"] = tf["xg"] - tf["xga"]
+        tf["avg_possession"] = stats.get("avg_possession", stats.get("possession_pct", tf["avg_possession"]))
+        tf["avg_shots_on_target"] = stats.get("avg_shots_on_target", tf["avg_shots_on_target"])
+        tf["shot_accuracy"] = stats.get("shot_accuracy", tf["shot_accuracy"])
+        tf["avg_pass_accuracy"] = stats.get("avg_pass_accuracy", tf["avg_pass_accuracy"])
+        tf["avg_corners"] = stats.get("avg_corners", tf["avg_corners"])
+        tf["avg_saves"] = stats.get("avg_saves", tf["avg_saves"])
+        tf["ppda"] = stats.get("ppda", tf["ppda"])
+        tf["progressive_passes"] = stats.get("progressive_passes", tf["progressive_passes"])
+        tf["progressive_carries"] = stats.get("progressive_carries", tf["progressive_carries"])
+        tf["pressures"] = stats.get("pressures", tf["pressures"])
+    return team_features
 
 
 # ─── Player feature computation ────────────────────────────────────────────────

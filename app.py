@@ -19,6 +19,13 @@ from features import (
     get_finished_matches,
     get_scheduled_matches,
     get_top_players_for_team,
+    merge_advanced_stats,
+)
+from stats_client import (
+    compute_player_advanced_stats,
+    compute_team_advanced_stats,
+    get_fbref_player_stats,
+    get_fbref_team_stats,
 )
 from win_probability import (
     build_feature_vector,
@@ -73,8 +80,15 @@ def load_all_data():
     player_features = compute_player_features(finished) if finished else {}
     all_teams = list(team_features.keys())
     team_sentiment = {t: compute_team_sentiment(es, t) for t in all_teams}
+
+    # Merge FBref advanced stats (xG, PPDA, progressive passes etc.)
+    fbref_team = get_fbref_team_stats()
+    fbref_player = get_fbref_player_stats()
+    if fbref_team:
+        merge_advanced_stats(team_features, fbref_team)
+
     model, scaler = train_model(finished, team_features, team_sentiment) if len(finished) >= 5 else (None, None)
-    return finished, scheduled, team_features, player_features, team_sentiment, model, scaler, all_teams
+    return finished, scheduled, team_features, player_features, team_sentiment, model, scaler, all_teams, fbref_player
 
 
 @st.cache_data(ttl=60)
@@ -112,7 +126,7 @@ st.title("⚽ World Cup 2026")
 st.caption("Real-time sentiment analysis · Win probability model · Player & team stats")
 
 try:
-    finished, scheduled, team_features, player_features, team_sentiment, model, scaler, all_teams = load_all_data()
+    finished, scheduled, team_features, player_features, team_sentiment, model, scaler, all_teams, fbref_player = load_all_data()
     es_ok = True
 except Exception as e:
     st.error(f"Cannot connect to Elasticsearch at {ES_HOST}. Make sure `docker-compose up -d` is running.\n\n`{e}`")
@@ -132,12 +146,13 @@ k5.metric("Avg Sentiment", f"{avg_sent_all:.3f}")
 st.divider()
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🎯 Match Predictions",
     "🏆 Tournament Leaderboard",
     "📊 Sentiment Analysis",
     "👤 Player Stats",
     "⚡ Sentiment Spikes",
+    "📐 Advanced Stats",
 ])
 
 
@@ -429,6 +444,117 @@ with tab5:
                         st.caption("No match events found near this spike.")
                 except Exception:
                     st.caption("Could not load match events.")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 6 — ADVANCED STATS
+# ══════════════════════════════════════════════════════════════════════════════
+with tab6:
+    st.subheader("Advanced Team Stats")
+    st.caption("xG/xGA from FBref · Possession, shots, passes from API-Football")
+
+    adv_rows = []
+    for team in all_teams:
+        tf = team_features.get(team, {})
+        adv_rows.append({
+            "Team": team,
+            "xG": round(tf.get("xg", 0), 2),
+            "xGA": round(tf.get("xga", 0), 2),
+            "xG Diff": round(tf.get("xg_difference", 0), 2),
+            "Possession %": round(tf.get("avg_possession", 0) * 100, 1),
+            "Shot Acc %": round(tf.get("shot_accuracy", 0) * 100, 1),
+            "Pass Acc %": round(tf.get("avg_pass_accuracy", 0) * 100, 1),
+            "Shots on Target": round(tf.get("avg_shots_on_target", 0), 1),
+            "Corners/Game": round(tf.get("avg_corners", 0), 1),
+            "PPDA": round(tf.get("ppda", 0), 2),
+            "Prog Passes": round(tf.get("progressive_passes", 0), 1),
+            "Prog Carries": round(tf.get("progressive_carries", 0), 1),
+            "Pressures": round(tf.get("pressures", 0), 1),
+        })
+
+    adv_df = pd.DataFrame(adv_rows).sort_values("xG Diff", ascending=False)
+
+    has_xg = adv_df["xG"].sum() > 0
+
+    if has_xg:
+        # xG vs xGA scatter proxy — use bar chart
+        st.markdown("**xG vs xGA (attacking vs defensive quality)**")
+        xg_df = adv_df.set_index("Team")[["xG", "xGA"]].sort_values("xG", ascending=False)
+        st.bar_chart(xg_df, color=["#0d9488", "#e05694"], height=300)
+
+        st.markdown("**xG Difference (xG − xGA)**")
+        st.bar_chart(adv_df.set_index("Team")["xG Diff"], color="#5b8def", height=250)
+
+        st.markdown("**Possession %**")
+        st.bar_chart(adv_df.set_index("Team")["Possession %"], color="#0d9488", height=250)
+
+        st.markdown("**Pressing Intensity (PPDA — lower = more aggressive)**")
+        ppda_df = adv_df[adv_df["PPDA"] > 0].set_index("Team")["PPDA"].sort_values()
+        if not ppda_df.empty:
+            st.bar_chart(ppda_df, color="#f59e0b", height=250)
+
+        st.markdown("**Full Advanced Stats Table**")
+        st.dataframe(adv_df, hide_index=True, use_container_width=True)
+    else:
+        st.info("Advanced stats (xG, PPDA etc.) not available yet — FBref data loads when the World Cup 2026 page is published. Basic API-Football stats shown below once matches are synced.")
+        st.dataframe(adv_df[["Team", "Possession %", "Shot Acc %", "Pass Acc %", "Shots on Target", "Corners/Game"]], hide_index=True, use_container_width=True)
+
+    # ── Advanced Player Stats ──
+    st.subheader("Advanced Player Stats")
+
+    all_player_adv = {}
+    # Merge FBref player data
+    for name, fdata in fbref_player.items():
+        all_player_adv[name] = fdata
+
+    # Merge base player features
+    for name, stats in player_features.items():
+        if name not in all_player_adv:
+            all_player_adv[name] = {}
+        all_player_adv[name].update({
+            "team": stats.get("team", ""),
+            "goals": stats.get("goals", 0),
+            "assists": stats.get("assists", 0),
+            "matches": stats.get("matches", 0),
+            "goals_per90": stats.get("goals_per_match", 0),
+            "goal_contributions_per_match": stats.get("goal_contributions_per_match", 0),
+        })
+
+    if all_player_adv:
+        player_adv_rows = []
+        for name, p in all_player_adv.items():
+            if not p.get("team"):
+                continue
+            player_adv_rows.append({
+                "Player": name,
+                "Team": p.get("team", ""),
+                "G": p.get("goals", 0),
+                "A": p.get("assists", 0),
+                "xG": round(p.get("xg", 0), 2),
+                "xA": round(p.get("xa", 0), 2),
+                "npxG": round(p.get("npxg", 0), 2),
+                "Key Passes/90": round(p.get("key_passes_per90", p.get("key_passes", 0)), 2),
+                "Prog Pass/90": round(p.get("progressive_passes", 0), 2),
+                "Prog Carry/90": round(p.get("progressive_carries", 0), 2),
+                "Pressures": round(p.get("pressures", 0), 1),
+                "Aerial Won %": round(p.get("aerial_won_pct", 0), 1),
+                "Def Actions/90": round(p.get("defensive_actions_per90", 0), 2),
+                "G+A/M": round(p.get("goal_contributions_per_match", 0), 2),
+            })
+
+        padv_df = pd.DataFrame(player_adv_rows).sort_values("xG", ascending=False)
+
+        f1, f2 = st.columns(2)
+        teams_adv = ["All"] + sorted(padv_df["Team"].unique().tolist())
+        sel_team = f1.selectbox("Filter by team", teams_adv, key="adv_team")
+        sort_by = f2.selectbox("Sort by", ["xG", "xA", "Key Passes/90", "Prog Pass/90", "Def Actions/90", "G+A/M"], key="adv_sort")
+
+        if sel_team != "All":
+            padv_df = padv_df[padv_df["Team"] == sel_team]
+        padv_df = padv_df.sort_values(sort_by, ascending=False)
+
+        st.dataframe(padv_df, hide_index=True, use_container_width=True)
+    else:
+        st.info("No player data yet.")
 
 # ─── Footer ───────────────────────────────────────────────────────────────────
 st.divider()

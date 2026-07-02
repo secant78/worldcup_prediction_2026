@@ -13,6 +13,7 @@ from elasticsearch import Elasticsearch
 from kafka import KafkaProducer
 
 from football_client import (
+    get_fixture_events,
     get_live_matches,
     get_match,
     get_matches,
@@ -48,32 +49,34 @@ def upsert_match(es, doc: dict):
 
 
 def sync_all_matches(es):
-    """Sync all tournament matches to ES, fetching full detail for finished ones."""
+    """Sync all tournament matches to ES, fetching events for finished ones."""
     print("[football] Syncing all matches to ES...")
     count = 0
-    for status in ["SCHEDULED", "TIMED", "LIVE", "IN_PLAY"]:
-        for match in get_matches(status=status):
-            doc = normalize_match_event(match)
+
+    # Sync non-finished matches (no events needed)
+    for status in ["NS", "LIVE", "1H", "2H", "HT"]:
+        for fixture in get_matches(status=status):
+            doc = normalize_match_event(fixture)
             upsert_match(es, doc)
             count += 1
 
-    # Fetch full match detail for finished matches to get goal scorers/cards
-    print("[football] Fetching detailed data for finished matches...")
-    finished = get_matches(status="FINISHED")
-    for i, match in enumerate(finished):
-        match_id = match.get("id")
-        if not match_id:
+    # Fetch events for finished matches to get goal scorers/cards
+    print("[football] Fetching events for finished matches (this may take a few minutes)...")
+    finished = get_matches(status="FT")
+    for i, fixture in enumerate(finished):
+        fix_id = fixture.get("fixture", {}).get("id")
+        if not fix_id:
             continue
         try:
-            full = get_match(match_id)
-            doc = normalize_match_event(full)
+            events = get_fixture_events(fix_id)
+            doc = normalize_match_event(fixture, events)
             upsert_match(es, doc)
             count += 1
             if (i + 1) % 10 == 0:
                 print(f"[football]   {i + 1}/{len(finished)} finished matches synced...")
-            time.sleep(0.6)  # respect rate limit (10 req/min on free tier)
+            time.sleep(7)  # API-Football free tier: ~10 req/min
         except Exception as e:
-            print(f"[football] Error fetching match {match_id}: {e}")
+            print(f"[football] Error fetching events for fixture {fix_id}: {e}")
 
     print(f"[football] Synced {count} matches total.")
 

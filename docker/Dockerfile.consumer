@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install dependencies first for layer caching
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Pre-download HuggingFace models (fallback when Bedrock unavailable)
+RUN python -c "from transformers import pipeline; \
+    pipeline('sentiment-analysis', model='cardiffnlp/twitter-roberta-base-sentiment-latest'); \
+    pipeline('ner', model='dslim/bert-base-NER', aggregation_strategy='simple')"
+
+COPY *.py .
+
+CMD ["python", "consumer.py"]
